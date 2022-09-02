@@ -38,7 +38,7 @@ if __name__ == '__main__':
 		name = "CNN"
 	else:
 		name = "DM"
-
+	print (name)
 	make_dir("./"+name)
 	max_len, max_len_filename, article_sizes = calc_article_sizes(sys.argv[1], name)
 	sorted_article_values = np.array(sorted(article_sizes.values()))

@@ -122,21 +122,32 @@ def generate_beam_sample(data, tokenizer, model, num=1, length=100, beam_size=3,
             tokenizer = gpt/gpt2 tokenizer
             num = number of articles for which summaries has to be generated
     """
+    cands = []
+    refs = []
     for i in range(num):
-        sample = data[i]
-        idx = sample['sum_idx']
-        context = sample['article'][:idx].tolist()
-        summary = sample['article'][idx+1:][:100].tolist()
-        scores, sequences = beam_search(model, context, length, beam_size, device)
-        print('new_article', end='\n\n')
-        print(tokenizer.decode(context[:-1]), end='\n\n')
-        print('actual_summary', end='\n\n')
-        print(tokenizer.decode(summary), end='\n\n')
-        for i in range(len(sequences)):
-            text = tokenizer.convert_ids_to_tokens(sequences[i],skip_special_tokens=True)
-            text = tokenizer.convert_tokens_to_string(text)  
-            print("generated_summary-{} and Score is {}.".format(i+1, scores[i]), end='\n\n')
-            print(text, end='\n\n')
+        try:
+            sample = data[i]
+            idx = sample['sum_idx']
+            context = sample['article'][:idx].tolist()
+            summary = sample['article'][idx+1:][:100].tolist()
+            scores, sequences = beam_search(model, context, length, beam_size, device)
+            #print('new_article', end='\n\n')
+            #print(tokenizer.decode(context[:-1]), end='\n\n')
+            #print('actual_summary', end='\n\n')
+            ref = tokenizer.decode(summary)
+            #print(ref, end='\n\n')
+            refs.append(ref)
+            texts = []
+            for i in range(len(sequences)):
+                text = tokenizer.convert_ids_to_tokens(sequences[i],skip_special_tokens=True)
+                text = tokenizer.convert_tokens_to_string(text)  
+            #print("generated_summary-{} and Score is {}.".format(len(sequences), scores[len(sequences)-1]), end='\n\n')
+            #print(text, end='\n\n')
+            cands.append(text)
+            print (len(cands), len(refs))
+        except:
+            continue
+    return refs, cands
 
 
 def generate_sample(data, tokenizer, model, num=1, eval_step=False, length=100, temperature=1, top_k=10, top_p=0.5, device=torch.device('cuda')):

@@ -4,7 +4,8 @@ import os
 import time
 
 import numpy as np
-from transformers import GPT2LMHeadModel,AdamW, WarmupLinearSchedule
+from transformers import GPT2LMHeadModel,AdamW
+from transformers import get_linear_schedule_with_warmup
 from torch.utils.tensorboard import SummaryWriter
 import torch
 from torch.nn import CrossEntropyLoss
@@ -13,7 +14,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from tqdm import tnrange, tqdm
 
 from dataset import GPT21024Dataset 
-from utils import add_special_tokens, generate_sample, set_seed
+from utils import add_special_tokens, generate_sample, generate_beam_sample, set_seed
 
 
 
@@ -31,7 +32,7 @@ def train(args, model, tokenizer, train_dataset, valid_dataset, ignore_index):
     train_dl = DataLoader(train_dataset,sampler=train_sampler,batch_size=args.batch_size,num_workers=args.num_workers)
     loss_fct = CrossEntropyLoss(ignore_index=ignore_index) #ignores padding token for loss calculation
     optimizer = AdamW(model.parameters(),lr=args.lr)
-    scheduler = WarmupLinearSchedule(optimizer,100,80000)
+    scheduler = get_linear_schedule_with_warmup(optimizer,100,80000)
 
     global_step = 0
     tr_loss, logging_loss = 0.0, 0.0
@@ -47,7 +48,7 @@ def train(args, model, tokenizer, train_dataset, valid_dataset, ignore_index):
             model.train()
             logits = model(inputs)[0]
             idx = batch['sum_idx'].item() # index of separator token
-            # only consider loss on reference summary just like seq2seq models
+                # only consider loss on reference summary just like seq2seq models
             shift_logits = logits[..., idx:-1, :].contiguous()
             shift_labels = labels[..., idx+1:].contiguous()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
@@ -65,8 +66,8 @@ def train(args, model, tokenizer, train_dataset, valid_dataset, ignore_index):
                 logging_loss = tr_loss
                 print("loss:", loss.item(), end='\n\n')
                 if (step + 1)/args.gradient_accumulation_steps == 1.0:
-                	print('After 1st update: ', end='\n\n')
-                	generate_sample(valid_dataset, tokenizer, num=2, eval_step=False,device=args.device)
+                    print('After 1st update: ', end='\n\n')
+                    generate_sample(valid_dataset, tokenizer, model, num=2, eval_step=False, device=args.device)
                 
                 
             if (step + 1) % (10*args.gradient_accumulation_steps) == 0:
@@ -74,9 +75,8 @@ def train(args, model, tokenizer, train_dataset, valid_dataset, ignore_index):
                 for key, value in results.items():
                     writer.add_scalar('eval_{}'.format(key), value, global_step)
                 print('After', global_step+1,'updates: ', end='\n\n')
-                generate_sample(valid_dataset, tokenizer, num=2, eval_step=True,device=args.device)
+                generate_sample(valid_dataset, tokenizer, model, num=2, eval_step=True,device=args.device)
                     
-     
 
 def evaluate(args, model, eval_dataset, ignore_index, global_step=None):
     """ Returns perplexity score on validation dataset.
@@ -122,29 +122,38 @@ def evaluate(args, model, eval_dataset, ignore_index, global_step=None):
     print("perplexity:", perplexity.item())
 
     if global_step:
-    	output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
+        output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
         with open(output_eval_file, "a") as f:
             for key in sorted(result.keys()):
                 f.write('\n\n')
                 f.write("time = %s, %s = %s, step = %s\n" % (datetime.now().strftime("%d/%m/%Y %H:%M:%S"), key, str(result[key]), str(global_step)))
-    return result           
+    return result 
+
+from datasets import load_metric
+metric = load_metric("rouge")
+
+def calc_rouge_scores(candidates, references):
+    result = metric.compute(predictions=candidates, references=references, use_stemmer=True)
+    result = {key: round(value.mid.fmeasure * 100, 1) for key, value in result.items()}
+    return result
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--lr",default=5e-5, type=float, required=True, help="learning rate")
+    parser.add_argument("--lr",default=5e-5, type=float, required=False, help="learning rate")
     parser.add_argument("--seed",default=42, type=int, required=False, help="seed to replicate results")
+    parser.add_argument("--num_shots",default=16, type=int, required=False, help="num_of_few_shots")
     parser.add_argument("--n_gpu",default=1, type=int, required=False, help="no of gpu available")
-    parser.add_argument("--gradient_accumulation_steps",default=32, type=int, required=True, help="gradient_accumulation_steps")
-    parser.add_argument("--batch_size",default=1, type=int, required=True, help="batch_size")
+    parser.add_argument("--gradient_accumulation_steps",default=4, type=int, required=False, help="gradient_accumulation_steps")
+    parser.add_argument("--batch_size",default=8, type=int, required=False, help="batch_size")
     parser.add_argument("--num_workers",default=4, type=int, required=False, help="num of cpus available")
-    parser.add_argument("--device",default=torch.device('cpu'), required=False, help="torch.device object")
-    parser.add_argument("--num_train_epochs",default=1, type=int, required=True, help="no of epochs of training")
-    parser.add_argument("--output_dir",default='./output', type=str, required=True, help="path to save evaluation results")
-    parser.add_argument("--model_dir",default='./weights', type=str, required=True, help="path to save trained model")
+    parser.add_argument("--device",default=torch.device('cuda:4'), required=False, help="torch.device object")
+    parser.add_argument("--num_train_epochs",default=1, type=int, required=False, help="no of epochs of training")
+    parser.add_argument("--output_dir",default='./output', type=str, required=False, help="path to save evaluation results")
+    parser.add_argument("--model_dir",default='./weights', type=str, required=False, help="path to save trained model")
     parser.add_argument("--fp16",default=True, type=bool, required=False, help="whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
     parser.add_argument("--fp16_opt_level",default='O0', type=str, required=False, help="apex AMP optimization level selected in ['O0', 'O1', 'O2', and 'O3'].")
     parser.add_argument("--max_grad_norm",default=1.0, type=float, help="max gradient norm.")
-    parser.add_argument("--root_dir",default='./CNN/gpt2_1024_data', type=str, help="location of json dataset.")
+    parser.add_argument("--root_dir",default='./gpt2_1024_data', type=str, help="location of json dataset.")
     parser.add_argument("--ids_file",default='./CNN/ids.json', type=str, help="location of train, valid and test file indexes")
     args = parser.parse_args()
 
@@ -152,20 +161,34 @@ def main():
     valid_data = GPT21024Dataset(args.root_dir,args.ids_file,mode='valid',length=500)  #validation on only 500 datasets
     tokenizer = add_special_tokens()
     ignore_idx = tokenizer.pad_token_id
-    model = GPT2LMHeadModel.from_pretrained('gpt2')
+    model = GPT2LMHeadModel.from_pretrained('gpt2-medium')
     model.resize_token_embeddings(len(tokenizer))
-    model.to(args.device)
-
+    device = torch.device('cuda:4')
+    model.to(device)
+    print ("generate before train")
+    cands, refs = generate_beam_sample(valid_data, tokenizer, model, num=1, device=device)
+    print(cands[1:3], end='\n\n')
+    print(refs[1:3], end='\n\n')
+    calc_rouge_scores(cands, refs)
     start = time.time()
     train(args, model, tokenizer, train_data, valid_data, ignore_idx)
     print('total time: ', (time.time()-start)/60, " minutes", end='\n\n')
+    
+    #gen_samples = generate_beam_sample
+    
+    
 
     print('Saving trained model...')
     model_file = os.path.join(args['model_dir'], 'model_{}_data{}_trained_after_{}_epochs_only_sum_loss_ignr_pad.bin'.format(args['fp16_opt_level'],3000,args['num_train_epochs']))
     config_file = os.path.join(args['model_dir'], 'config_{}_data{}_trained_after_{}_epochs_only_sum_loss_ignr_pad.json'.format(args['fp16_opt_level'],3000,args['num_train_epochs']))
     torch.save(model.state_dict(), model_file)
     model.config.to_json_file(config_file)
-
+    
+    print ("generate")
+    cands, refs = generate_beam_sample(valid_data, tokenizer, model, num=1, device=device)
+    print(cands[1:3], end='\n\n')
+    print(refs[1:3], end='\n\n')
+    prrint (calc_rouge_scores(cands, refs))
 
 if __name__ == '__main__':
 	main()

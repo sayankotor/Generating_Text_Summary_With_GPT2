@@ -51,7 +51,7 @@ def get_art_abs(lines):
 def write_json(i,article, abstract):
 	""" Saves a json file."""
 
-	file = "./gpt2_1024_data/"+str(i)+".json"
+	file = "/notebook/greenAI/summarization_test/gpt2_1024_data/"+str(i)+".json"
 	js_example = {}
 	js_example['id'] = i
 	js_example['article'] = article
